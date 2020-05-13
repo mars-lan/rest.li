@@ -16,7 +16,6 @@
 
 package com.linkedin.data;
 
-
 import com.linkedin.util.ArgumentUtil;
 import java.io.Closeable;
 import java.io.IOException;
