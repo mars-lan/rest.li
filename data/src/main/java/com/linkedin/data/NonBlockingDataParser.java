@@ -20,50 +20,100 @@ import java.io.IOException;
 
 
 /**
- * Data parser interface invoked by stream decoder.
+ * Data parser interface invoked by non blocking decoder.
  *
  * This interface contains methods that are invoked when parsing a Data object.
  * Each method represents a different kind of event/read action
  *
- * Methods can throw IOException as a checked exception to
- * indicate parsing error.
+ * Methods can throw IOException as a checked exception to indicate parsing error.
  *
  * @author amgupta1
  */
-public interface DataParser
+public interface NonBlockingDataParser
 {
   /**
    * Internal tokens, used to identify types of elements in data during decoding
    */
   enum Token
   {
+    /**
+     * START_OBJECT is returned when encountering signals starting of an Object/map value.
+     */
     START_OBJECT,
+    /**
+     * END_OBJECT is returned when encountering signals ending of an Object/map value
+     */
     END_OBJECT,
+    /**
+     * START_ARRAY is returned when encountering signals starting of an Array value
+     */
     START_ARRAY,
+    /**
+     * END_ARRAY is returned when encountering signals ending of an Array value
+     */
     END_ARRAY,
+    /**
+     * STRING is returned when encountering a string value, field name or reference
+     */
     STRING,
+    /**
+     * RAW_BYTES is returned when encountering chunk of raw bytes
+     */
+    RAW_BYTES,
+    /**
+     * INTEGER is returned when encountering integer value
+     */
     INTEGER,
+    /**
+     * LONG is returned when encountering long value
+     */
     LONG,
+    /**
+     * FLOAT is returned when encountering float decimal value
+     */
     FLOAT,
+    /**
+     * DOUBLE is returned when encountering double decimal value
+     */
     DOUBLE,
+    /**
+     * BOOL_TRUE is returned when encountering boolean true value
+     */
     BOOL_TRUE,
+    /**
+     * BOOL_FALSE is returned when encountering boolean false value
+     */
     BOOL_FALSE,
+    /**
+     * NULL is returned when encountering "null" in value context
+     */
     NULL,
-    NOT_AVAILABLE
+    /**
+     * NOT_AVAILABLE can be returned if {@link NonBlockingDataParser} implementation can not currently
+     * return the requested token (usually next one), or even if any will be available,
+     * but that may be able to determine this in future. This is the case with non-blocking parsers --
+     * they can not block to wait for more data to parse and must return something.
+     */
+    NOT_AVAILABLE,
+    /**
+     * Token returned at point when all feed input has been exhausted or
+     * input feeder has indicated no more input will be forthcoming.
+     */
+    EOF_INPUT
   }
 
   /**
-   * Method that can be called to feed more data
+   * Method that can be called to feed more data if {@link #nextToken()} returns {@link Token#NOT_AVAILABLE}
    *
    * @param data Byte array that contains data to feed: caller must ensure data remains
    *    stable until it is fully processed
    * @param offset Offset where input data to process starts
-   * @param end Offset after last byte contained in the input array
+   * @param len length of bytes to be feed from the input array
    *
    * @throws IOException if the state is such that this method should not be called
    *   (has not yet consumed existing input data, or has been marked as closed)
    */
-  void feedInput(byte[] data, int offset, int end) throws IOException;
+  void feedInput(byte[] data, int offset, int len) throws IOException;
 
   /**
    * Method that should be called after last chunk of data to parse has been fed
@@ -73,15 +123,22 @@ public interface DataParser
   void endOfInput();
 
   /**
-   * Main iteration method, which will advance stream enough
-   * to determine type of the next token, if any. If none
-   * remaining (stream has no content other than possible
-   * white space before ending), null will be returned.
+   * Main iteration method, which will advance input enough to determine type of the next token, if any.
+   * If none remaining (input has no content other than possible white space before ending), null will be returned.
    *
-   * @return Next token from the stream, if any found, or null
-   *   to indicate end-of-input
+   * @return Next token from the input, if any found, or null to indicate end-of-input
    */
   Token nextToken() throws IOException;
+
+  /**
+   * Method that can be called to get the size of current token Object returned
+   * from {@link NonBlockingDataParser#nextToken()}. Ex. {@link Token#START_OBJECT}s it will return size of map;
+   * if size is not available returns -1.
+   */
+  default int currentComplexObjSize()
+  {
+    return -1;
+  }
 
   /**
    * Method for accessing textual representation of the current token;
@@ -90,6 +147,12 @@ public interface DataParser
    * Method can be called for any token type.
    */
   String getString() throws IOException;
+
+  /**
+   * Method for accessing raw bytes as {@link ByteString} that can be called when the current
+   * token is of type {@link Token#RAW_BYTES}.
+   */
+  ByteString getRawBytes() throws IOException;
 
   /**
    * Numeric accessor that can be called when the current

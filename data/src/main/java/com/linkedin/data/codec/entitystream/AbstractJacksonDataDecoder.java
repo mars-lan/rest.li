@@ -20,13 +20,13 @@ import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.core.async.ByteArrayFeeder;
-import com.linkedin.data.Data;
+import com.linkedin.data.ByteString;
 import com.linkedin.data.DataComplex;
-import com.linkedin.data.DataParser;
+import com.linkedin.data.NonBlockingDataParser;
 import java.io.IOException;
 import java.util.EnumSet;
 
-import static com.linkedin.data.DataParser.Token.*;
+import static com.linkedin.data.NonBlockingDataParser.Token.*;
 
 
 /**
@@ -41,7 +41,7 @@ class AbstractJacksonDataDecoder<T extends DataComplex> extends AbstractDataDeco
 {
   /**
    * Internal tokens. Each token is presented by a bit in a byte.
-   * Deprecated, use {@link com.linkedin.data.DataParser.Token}
+   * Deprecated, use {@link NonBlockingDataParser.Token}
    */
   @Deprecated
   enum Token
@@ -71,12 +71,12 @@ class AbstractJacksonDataDecoder<T extends DataComplex> extends AbstractDataDeco
   {
     super();
     _jsonFactory = jsonFactory;
-    EnumSet<DataParser.Token> expectedDataToken = NONE;
+    EnumSet<NonBlockingDataParser.Token> expectedDataToken = NONE;
     if ((expectedFirstToken & Token.START_OBJECT.bitPattern) != 0) {
-      expectedDataToken.add(DataParser.Token.START_OBJECT);
+      expectedDataToken.add(NonBlockingDataParser.Token.START_OBJECT);
     }
     if ((expectedFirstToken & Token.START_ARRAY.bitPattern) != 0) {
-      expectedDataToken.add(DataParser.Token.START_ARRAY);
+      expectedDataToken.add(NonBlockingDataParser.Token.START_ARRAY);
     }
     _expectedTokens = expectedDataToken;
   }
@@ -86,18 +86,18 @@ class AbstractJacksonDataDecoder<T extends DataComplex> extends AbstractDataDeco
     this(jsonFactory, START_TOKENS);
   }
 
-  protected AbstractJacksonDataDecoder(JsonFactory jsonFactory, EnumSet<DataParser.Token> expectedFirstToken)
+  protected AbstractJacksonDataDecoder(JsonFactory jsonFactory, EnumSet<NonBlockingDataParser.Token> expectedFirstTokens)
   {
-    super(expectedFirstToken);
+    super(expectedFirstTokens);
     _jsonFactory = jsonFactory;
   }
 
   @Override
-  protected DataParser createDataParser() throws IOException {
+  protected NonBlockingDataParser createDataParser() throws IOException {
     return new JacksonStreamDataParser(_jsonFactory);
   }
 
-  class JacksonStreamDataParser implements DataParser
+  class JacksonStreamDataParser implements NonBlockingDataParser
   {
     private JsonParser _jsonParser;
     private ByteArrayFeeder _byteArrayFeeder;
@@ -110,15 +110,15 @@ class AbstractJacksonDataDecoder<T extends DataComplex> extends AbstractDataDeco
     }
 
     @Override
-    public void feedInput(byte[] data, int offset, int end) throws IOException
+    public void feedInput(byte[] data, int offset, int len) throws IOException
     {
       if(_byteArrayFeeder.needMoreInput())
       {
-        _byteArrayFeeder.feedInput(data, offset, end);
+        _byteArrayFeeder.feedInput(data, offset, offset + len);
       }
       else
       {
-        throw new IOException("Byte Array Feeder is not ok to feed more data.");
+        throw new IOException("Invalid state: Parser cannot accept more data");
       }
     }
 
@@ -129,12 +129,12 @@ class AbstractJacksonDataDecoder<T extends DataComplex> extends AbstractDataDeco
     }
 
     @Override
-    public DataParser.Token nextToken() throws IOException
+    public NonBlockingDataParser.Token nextToken() throws IOException
     {
       _previousTokenReturned = _jsonParser.nextToken();
       if (_previousTokenReturned == null)
       {
-        return null;
+        return EOF_INPUT;
       }
       switch (_previousTokenReturned)
       {
@@ -182,6 +182,11 @@ class AbstractJacksonDataDecoder<T extends DataComplex> extends AbstractDataDeco
     @Override
     public String getString() throws IOException {
       return _previousTokenReturned == JsonToken.FIELD_NAME ? _jsonParser.getCurrentName() : _jsonParser.getText();
+    }
+
+    @Override
+    public ByteString getRawBytes() throws IOException {
+      throw new UnsupportedOperationException();
     }
 
     @Override

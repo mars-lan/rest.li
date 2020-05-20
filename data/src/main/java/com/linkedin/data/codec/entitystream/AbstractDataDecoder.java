@@ -22,7 +22,7 @@ import com.linkedin.data.DataComplex;
 import com.linkedin.data.DataList;
 import com.linkedin.data.DataMap;
 import com.linkedin.data.DataMapBuilder;
-import com.linkedin.data.DataParser;
+import com.linkedin.data.NonBlockingDataParser;
 import com.linkedin.data.collections.CheckedUtil;
 import com.linkedin.entitystream.ReadHandle;
 import java.io.IOException;
@@ -32,12 +32,12 @@ import java.util.EnumSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
-import static com.linkedin.data.DataParser.Token.*;
+import static com.linkedin.data.NonBlockingDataParser.Token.*;
 
 /**
  * A decoder for a {@link DataComplex} object implemented as a
  * {@link com.linkedin.entitystream.Reader} reading from an {@link com.linkedin.entitystream.EntityStream} of
- * ByteString. The implementation is backed by a non blocking {@link com.linkedin.data.DataParser}
+ * ByteString. The implementation is backed by a non blocking {@link NonBlockingDataParser}
  * because the raw bytes are pushed to the decoder, it keeps the partially built data structure in a stack.
  * It is not thread safe. Caller must ensure thread safety.
  *
@@ -45,18 +45,18 @@ import static com.linkedin.data.DataParser.Token.*;
  */
 abstract class AbstractDataDecoder<T extends DataComplex> implements DataDecoder<T>
 {
-  private static final EnumSet<DataParser.Token> SIMPLE_VALUE =
+  private static final EnumSet<NonBlockingDataParser.Token> SIMPLE_VALUE =
       EnumSet.of(STRING, INTEGER, LONG, FLOAT, DOUBLE, BOOL_TRUE, BOOL_FALSE, NULL);
-  private static final EnumSet<DataParser.Token> FIELD_NAME = EnumSet.of(STRING);
-  private static final EnumSet<DataParser.Token> VALUE = EnumSet.of(START_OBJECT, START_ARRAY);
-  private static final EnumSet<DataParser.Token> NEXT_OBJECT_FIELD = EnumSet.of(END_OBJECT);
-  private static final EnumSet<DataParser.Token> NEXT_ARRAY_ITEM = EnumSet.of(END_ARRAY);
+  private static final EnumSet<NonBlockingDataParser.Token> FIELD_NAME = EnumSet.of(STRING);
+  private static final EnumSet<NonBlockingDataParser.Token> VALUE = EnumSet.of(START_OBJECT, START_ARRAY);
+  private static final EnumSet<NonBlockingDataParser.Token> NEXT_OBJECT_FIELD = EnumSet.of(END_OBJECT);
+  private static final EnumSet<NonBlockingDataParser.Token> NEXT_ARRAY_ITEM = EnumSet.of(END_ARRAY);
 
-  protected static final EnumSet<DataParser.Token> NONE = EnumSet.noneOf(DataParser.Token.class);
-  protected static final EnumSet<DataParser.Token> START_TOKENS =
-      EnumSet.of(DataParser.Token.START_OBJECT, DataParser.Token.START_ARRAY);
-  protected static final EnumSet<DataParser.Token> START_ARRAY_TOKEN = EnumSet.of(DataParser.Token.START_ARRAY);
-  protected static final EnumSet<DataParser.Token> START_OBJECT_TOKEN = EnumSet.of(DataParser.Token.START_OBJECT);
+  protected static final EnumSet<NonBlockingDataParser.Token> NONE = EnumSet.noneOf(NonBlockingDataParser.Token.class);
+  protected static final EnumSet<NonBlockingDataParser.Token> START_TOKENS =
+      EnumSet.of(NonBlockingDataParser.Token.START_OBJECT, NonBlockingDataParser.Token.START_ARRAY);
+  protected static final EnumSet<NonBlockingDataParser.Token> START_ARRAY_TOKEN = EnumSet.of(NonBlockingDataParser.Token.START_ARRAY);
+  protected static final EnumSet<NonBlockingDataParser.Token> START_OBJECT_TOKEN = EnumSet.of(NonBlockingDataParser.Token.START_OBJECT);
 
   static
   {
@@ -68,26 +68,29 @@ abstract class AbstractDataDecoder<T extends DataComplex> implements DataDecoder
   private CompletableFuture<T> _completable;
   private T _result;
   private ReadHandle _readHandle;
-  private DataParser _parser;
+  private NonBlockingDataParser _parser;
 
   private Deque<DataComplex> _stack;
   private Deque<String> _currFieldStack;
   private String _currField;
+  private Deque<Integer> _currObjSizeStack;
+  private int _currObjSize;
   private DataMapBuilder _currDataMapBuilder;
   private boolean _isCurrList;
   private ByteString _currentChunk;
   private int _currentChunkIndex = -1;
 
-  protected EnumSet<DataParser.Token> _expectedTokens;
+  protected EnumSet<NonBlockingDataParser.Token> _expectedTokens;
 
-  protected AbstractDataDecoder(EnumSet<DataParser.Token> expectedTokens)
+  protected AbstractDataDecoder(EnumSet<NonBlockingDataParser.Token> expectedFirstTokens)
   {
     _completable = new CompletableFuture<>();
     _result = null;
     _stack = new ArrayDeque<>();
     _currFieldStack = new ArrayDeque<>();
-    _currDataMapBuilder = new DataMapBuilder();
-    _expectedTokens = expectedTokens;
+    _expectedTokens = expectedFirstTokens;
+    _currObjSize = -1;
+    _currObjSizeStack = null;
   }
 
   protected AbstractDataDecoder()
@@ -114,9 +117,8 @@ abstract class AbstractDataDecoder<T extends DataComplex> implements DataDecoder
 
   /**
    * Interface to create non blocking data object parser that process different kind of event/read operations.
-   * Method can throw IOException
    */
-  protected abstract DataParser createDataParser() throws IOException;
+  protected abstract NonBlockingDataParser createDataParser() throws IOException;
 
   @Override
   public void onDataAvailable(ByteString data)
@@ -156,36 +158,47 @@ abstract class AbstractDataDecoder<T extends DataComplex> implements DataDecoder
   {
     try
     {
-      DataParser.Token token;
-      while ((token = _parser.nextToken()) != null)
+      NonBlockingDataParser.Token token;
+      while ((token = _parser.nextToken()) != EOF_INPUT)
       {
+        validate(token);
         switch (token)
         {
           case START_OBJECT:
-            validate(START_OBJECT);
-            // If we are already filling out a DataMap, we cannot reuse _currDataMapBuilder and thus
-            // need to create a new one.
-            if (_currDataMapBuilder.inUse())
+            _currObjSize = _parser.currentComplexObjSize();
+            if (_currObjSize >= 0)
             {
-              _currDataMapBuilder = new DataMapBuilder();
+              push(new DataMap(DataMapBuilder.getOptimumHashMapCapacityFromSize(_currObjSize)), false);
             }
-            _currDataMapBuilder.setInUse(true);
-            push(_currDataMapBuilder, false);
+            else
+            {
+              // If we are already filling out a DataMap, we cannot reuse _currDataMapBuilder and thus
+              // need to create a new one.
+              if (_currDataMapBuilder == null || _currDataMapBuilder.inUse()) {
+                _currDataMapBuilder = new DataMapBuilder();
+              }
+              _currDataMapBuilder.setInUse(true);
+              push(_currDataMapBuilder, false);
+            }
             break;
           case END_OBJECT:
-            validate(END_OBJECT);
             pop();
             break;
           case START_ARRAY:
-            validate(START_ARRAY);
-            push(new DataList(), true);
+            _currObjSize = _parser.currentComplexObjSize();
+            if (_currObjSize >= 0)
+            {
+              push(new DataList(_currObjSize), true);
+            }
+            else
+            {
+              push(new DataList(), true);
+            }
             break;
           case END_ARRAY:
-            validate(END_ARRAY);
             pop();
             break;
           case STRING:
-            validate(STRING);
             if (!_isCurrList && _currField == null) {
               _currField = _parser.getString();
               _expectedTokens = VALUE;
@@ -206,15 +219,12 @@ abstract class AbstractDataDecoder<T extends DataComplex> implements DataDecoder
             addValue(_parser.getDoubleValue());
             break;
           case BOOL_TRUE:
-            validate(BOOL_TRUE);
             addValue(Boolean.TRUE);
             break;
           case BOOL_FALSE:
-            validate(BOOL_FALSE);
             addValue(Boolean.FALSE);
             break;
           case NULL:
-            validate(NULL);
             addValue(Data.NULL);
             break;
           case NOT_AVAILABLE:
@@ -231,9 +241,9 @@ abstract class AbstractDataDecoder<T extends DataComplex> implements DataDecoder
     }
   }
 
-  protected final void validate(DataParser.Token token)
+  protected final void validate(NonBlockingDataParser.Token token)
   {
-    if (!_expectedTokens.contains(token))
+    if (!(token == NOT_AVAILABLE || _expectedTokens.contains(token)))
     {
       handleException(new Exception("Expecting " + _expectedTokens + " but got " + token));
     }
@@ -241,6 +251,16 @@ abstract class AbstractDataDecoder<T extends DataComplex> implements DataDecoder
 
   private void push(DataComplex dataComplex, boolean isList)
   {
+    if (_currObjSize >= 0)
+    {
+      _currObjSizeStack.push(_currObjSize);
+    }
+    if (_currObjSize == 0)
+    {
+      addValue(dataComplex);
+      return;
+    }
+
     if (!(_isCurrList || _stack.isEmpty()))
     {
       _currFieldStack.push(_currField);
@@ -273,6 +293,10 @@ abstract class AbstractDataDecoder<T extends DataComplex> implements DataDecoder
     else
     {
       _isCurrList = _stack.peek() instanceof DataList;
+      if (_currObjSizeStack != null)
+      {
+        _currObjSize = _currObjSizeStack.pop();
+      }
       if (!_isCurrList)
       {
         _currField = _currFieldStack.pop();
@@ -282,14 +306,17 @@ abstract class AbstractDataDecoder<T extends DataComplex> implements DataDecoder
     }
   }
 
+  @SuppressWarnings("unchecked")
   protected void addValue(Object value)
   {
     if (!_stack.isEmpty())
     {
       DataComplex currItem = _stack.peek();
+      int currItemSize = -1;
       if (_isCurrList)
       {
         CheckedUtil.addWithoutChecking((DataList) currItem, value);
+        currItemSize = ((DataList) currItem).size();
       }
       else
       {
@@ -311,11 +338,24 @@ abstract class AbstractDataDecoder<T extends DataComplex> implements DataDecoder
         else
         {
           CheckedUtil.putWithoutChecking((DataMap) currItem, _currField, value);
+          currItemSize = ((DataMap) currItem).size();
         }
         _currField = null;
       }
-
-      updateExpected();
+      if (_currObjSize != -1 && currItemSize != -1 && _currObjSize == currItemSize)
+      {
+        pop();
+      }
+      else
+      {
+        updateExpected();
+      }
+    }
+    else
+    {
+      _result = (T) value;
+      // No more tokens is expected.
+      _expectedTokens = NONE;
     }
   }
 

@@ -482,7 +482,7 @@ public final class ByteString
   }
 
   /**
-   * Feeds a chunk of this {@link ByteString} to a {@link com.linkedin.data.DataParser}
+   * Feeds a chunk of this {@link ByteString} to a {@link NonBlockingDataParser}
    * without copying the underlying byte[].
    *
    * @param parser the feeder to feed the bytes to
@@ -492,11 +492,10 @@ public final class ByteString
    *
    * @return The next index to feed or -1 if no more indices are left to feed.
    */
-  public int feed(DataParser parser, int index) throws IOException
+  public int feed(NonBlockingDataParser parser, int index) throws IOException
   {
     ByteArray byteArray = _byteArrays.get(index);
-    int end = byteArray.getOffset() + byteArray.getLength();
-    parser.feedInput(byteArray.getArray(), byteArray.getOffset(), end);
+    parser.feedInput(byteArray.getArray(), byteArray.getOffset(), byteArray.getLength());
     int returnIndex = index + 1;
     return returnIndex < _byteArrays.getArraySize() ? returnIndex : -1;
   }
